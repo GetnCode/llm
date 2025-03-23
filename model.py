@@ -10,14 +10,16 @@ from datasets import load_dataset
 from datetime import datetime
 from typing import Tuple, List, Optional
 
-# Global debug flag. Set to False to disable debug outputs.
+# Global debug flag. Set to True to enable detailed debug outputs.
 DEBUG = False
 
 def debug_print(*args, **kwargs):
+    """Prints debug messages if the DEBUG flag is set to True."""
     if DEBUG:
         print(*args, **kwargs)
 
 def print_tensor_stats(name: str, tensor: torch.Tensor):
+    """Prints min, max, and mean of a tensor for debugging purposes."""
     if not DEBUG or tensor.numel() == 0:
         return
     debug_print(f"{name}: min={tensor.min().item():.4f}, max={tensor.max().item():.4f}, mean={tensor.mean().item():.4f}")
@@ -27,7 +29,22 @@ def print_tensor_stats(name: str, tensor: torch.Tensor):
 ########################################
 
 class DilatedHierarchicalConvolution(nn.Module):
+    """
+    Applies dilated convolutions in a hierarchical manner.
+
+    This module consists of multiple dilated convolutional layers, each with a different dilation rate.
+    The outputs of these layers are concatenated and passed through a linear projection layer.
+    """
     def __init__(self, hidden_dim: int, kernel_size: int, dilations: List[int], dropout: float = 0.0):
+        """
+        Initializes the DilatedHierarchicalConvolution module.
+
+        Args:
+            hidden_dim (int): The number of input and output features.
+            kernel_size (int): The size of the convolutional kernel.
+            dilations (List[int]): A list of dilation rates for the convolutional layers.
+            dropout (float): The dropout probability.
+        """
         super().__init__()
         self.layers = nn.ModuleList()
         for dilation in dilations:
@@ -38,6 +55,15 @@ class DilatedHierarchicalConvolution(nn.Module):
         self.activation = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Applies the dilated hierarchical convolutions to the input tensor.
+
+        Args:
+            x (torch.Tensor): The input tensor of shape (B, seq_len, hidden_dim).
+
+        Returns:
+            torch.Tensor: The output tensor of shape (B, seq_len, hidden_dim).
+        """
         # x expected to be (B, seq_len, hidden_dim)
         if x.dim() == 2:
             x = x.unsqueeze(0)
@@ -59,12 +85,30 @@ class DilatedHierarchicalConvolution(nn.Module):
 ########################################
 
 class StaticTensorPool(nn.Module):
+    """
+    A shared static tensor pool for storing precomputed tensors.
+
+    This module creates a pool of tensors and normalizes them.
+    """
     def __init__(self, pool_size: int, tensor_dim: int):
+        """
+        Initializes the StaticTensorPool module.
+
+        Args:
+            pool_size (int): The number of tensors in the pool.
+            tensor_dim (int): The dimensionality of each tensor.
+        """
         super().__init__()
         pool = torch.randn(pool_size, tensor_dim)
         self.register_buffer('pool', pool / pool.norm(dim=-1, keepdim=True))
         
     def get_pool(self) -> torch.Tensor:
+        """
+        Returns the tensor pool.
+
+        Returns:
+            torch.Tensor: The tensor pool of shape (pool_size, tensor_dim).
+        """
         return self.pool
 
 ########################################
@@ -72,16 +116,24 @@ class StaticTensorPool(nn.Module):
 ########################################
 
 class AttentionRouter(nn.Module):
+    """
+    Routes input tokens to a subset of tensors from a shared pool using attention.
+
+    This module selects a subset of tensors from a shared pool based on attention scores
+    and combines them with the input tokens.
+    """
     def __init__(self, hidden_dim: int, pool_size: int, tensor_dim: int, 
                  top_k: int = 2, temperature: float = 0.5, diversity_loss_scale: float = 0.01):
         """
+        Initializes the AttentionRouter module.
+
         Args:
-            hidden_dim: Input token dimension.
-            pool_size: Number of entries in the tensor pool.
-            tensor_dim: Dimensionality for pool entries and projection.
-            top_k: Number of pool entries to select.
-            temperature: Initial temperature for softmax scaling.
-            diversity_loss_scale: Scaling factor for diversity loss.
+            hidden_dim (int): Input token dimension.
+            pool_size (int): Number of entries in the tensor pool.
+            tensor_dim (int): Dimensionality for pool entries and projection.
+            top_k (int): Number of pool entries to select.
+            temperature (float): Initial temperature for softmax scaling.
+            diversity_loss_scale (float): Scaling factor for diversity loss.
         """
         super().__init__()
         self.intermediate_dim = min(1024, pool_size)
@@ -101,6 +153,16 @@ class AttentionRouter(nn.Module):
                                                   for g in grad_input if g is not None]))
 
     def forward(self, x: torch.Tensor, tensor_pool: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Routes the input tokens to a subset of tensors from the shared pool.
+
+        Args:
+            x (torch.Tensor): The input tensor of shape (B, seq_len, hidden_dim).
+            tensor_pool (torch.Tensor): The tensor pool of shape (pool_size, tensor_dim).
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: The transformed tensor and the diversity loss.
+        """
         B, seq_len, _ = x.shape
         inter = F.relu(self.linear1(x))
         print_tensor_stats("AttentionRouter linear1 output", inter)
@@ -137,10 +199,30 @@ class AttentionRouter(nn.Module):
 ########################################
 
 class GlobalLocalAttention(nn.Module):
+    """
+    Combines local and global attention mechanisms.
+
+    This module applies dilated hierarchical convolutions (local attention) and attention routing (global attention)
+    to the input tokens and combines their outputs.
+    """
     def __init__(self, hidden_dim: int, pool_size: int, tensor_dim: int,
                  conv_kernel_size: int, dilations: List[int],
                  router_top_k: int = 2, router_temperature: float = 0.5,
                  dropout: float = 0.0, diversity_loss_scale: float = 0.01):
+        """
+        Initializes the GlobalLocalAttention module.
+
+        Args:
+            hidden_dim (int): The number of input and output features.
+            pool_size (int): The number of entries in the tensor pool.
+            tensor_dim (int): The dimensionality for pool entries and projection.
+            conv_kernel_size (int): The size of the convolutional kernel.
+            dilations (List[int]): A list of dilation rates for the convolutional layers.
+            router_top_k (int): The number of pool entries to select.
+            router_temperature (float): The initial temperature for softmax scaling.
+            dropout (float): The dropout probability.
+            diversity_loss_scale (float): The scaling factor for diversity loss.
+        """
         super().__init__()
         self.conv_module = DilatedHierarchicalConvolution(hidden_dim, conv_kernel_size, dilations, dropout)
         self.router = AttentionRouter(hidden_dim, pool_size, tensor_dim, top_k=router_top_k, 
@@ -150,6 +232,16 @@ class GlobalLocalAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, tensor_pool: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Applies the global and local attention mechanisms to the input tensor.
+
+        Args:
+            x (torch.Tensor): The input tensor of shape (B, seq_len, hidden_dim).
+            tensor_pool (torch.Tensor): The tensor pool of shape (pool_size, tensor_dim).
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: The combined output tensor and the diversity loss.
+        """
         local_out = self.conv_module(x)
         print_tensor_stats("Local branch output", local_out)
         router_out, attn_div_loss = self.router(x, tensor_pool)
@@ -167,10 +259,30 @@ class GlobalLocalAttention(nn.Module):
 ########################################
 
 class CustomTransformerBlock(nn.Module):
+    """
+    A custom transformer block with global and local attention mechanisms.
+
+    This module replaces the standard self-attention mechanism with a combination of
+    dilated hierarchical convolutions (local attention) and attention routing (global attention).
+    """
     def __init__(self, hidden_dim: int, pool_size: int, tensor_dim: int,
                  conv_kernel_size: int, dilations: List[int], router_top_k: int = 2,
                  dropout: float = 0.0, router_temperature: float = 0.5,
                  diversity_loss_scale: float = 0.01):
+        """
+        Initializes the CustomTransformerBlock module.
+
+        Args:
+            hidden_dim (int): The number of input and output features.
+            pool_size (int): The number of entries in the tensor pool.
+            tensor_dim (int): The dimensionality for pool entries and projection.
+            conv_kernel_size (int): The size of the convolutional kernel.
+            dilations (List[int]): A list of dilation rates for the convolutional layers.
+            router_top_k (int): The number of pool entries to select.
+            dropout (float): The dropout probability.
+            router_temperature (float): The initial temperature for softmax scaling.
+            diversity_loss_scale (float): The scaling factor for diversity loss.
+        """
         super().__init__()
         self.attn_replacement = GlobalLocalAttention(hidden_dim, pool_size, tensor_dim,
                                                       conv_kernel_size, dilations, router_top_k,
@@ -192,6 +304,16 @@ class CustomTransformerBlock(nn.Module):
         self.norm_ffn = nn.LayerNorm(hidden_dim)
 
     def forward(self, x: torch.Tensor, tensor_pool: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Applies the custom transformer block to the input tensor.
+
+        Args:
+            x (torch.Tensor): The input tensor of shape (B, seq_len, hidden_dim).
+            tensor_pool (torch.Tensor): The tensor pool of shape (pool_size, tensor_dim).
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: The output tensor and the total diversity loss.
+        """
         attn_out, attn_div_loss = self.attn_replacement(x, tensor_pool)
         x = self.norm1(x + self.dropout(attn_out))
         ffn_out, ffn_div_loss = self.ffn_router(x, tensor_pool)
@@ -207,10 +329,33 @@ class CustomTransformerBlock(nn.Module):
 ########################################
 
 class CustomTransformerModel(nn.Module):
+    """
+    A complete transformer model with custom transformer blocks.
+
+    This model consists of an embedding layer, multiple custom transformer blocks,
+    and an output projection layer.
+    """
     def __init__(self, vocab_size: int, hidden_dim: int, num_layers: int, max_seq_len: int,
                  pool_size: int = 10000, tensor_dim: int = None, conv_kernel_size: int = 3,
                  dilations: List[int] = [1, 2, 4], router_top_k: int = 2, dropout: float = 0.0,
                  router_temperature: float = 0.5, diversity_loss_scale: float = 0.01):
+        """
+        Initializes the CustomTransformerModel module.
+
+        Args:
+            vocab_size (int): The size of the vocabulary.
+            hidden_dim (int): The number of input and output features.
+            num_layers (int): The number of transformer layers.
+            max_seq_len (int): The maximum sequence length.
+            pool_size (int): The number of entries in the tensor pool.
+            tensor_dim (int): The dimensionality for pool entries and projection.
+            conv_kernel_size (int): The size of the convolutional kernel.
+            dilations (List[int]): A list of dilation rates for the convolutional layers.
+            router_top_k (int): The number of pool entries to select.
+            dropout (float): The dropout probability.
+            router_temperature (float): The initial temperature for softmax scaling.
+            diversity_loss_scale (float): The scaling factor for diversity loss.
+        """
         super().__init__()
         if tensor_dim is None:
             tensor_dim = 4 * hidden_dim
@@ -225,6 +370,15 @@ class CustomTransformerModel(nn.Module):
         self.output_head = nn.Linear(hidden_dim, vocab_size)
 
     def forward(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Applies the transformer model to the input tensor.
+
+        Args:
+            input_ids (torch.Tensor): The input tensor of shape (B, seq_len).
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: The output logits and the total diversity loss.
+        """
         x = self.embedding(input_ids)  # (B, seq_len, hidden_dim)
         if x.dim() == 2:
             x = x.unsqueeze(0)
@@ -278,9 +432,11 @@ tokenizer.pad_token = tokenizer.eos_token
 MAX_SEQ_LEN = MODEL_CONFIG["max_seq_len"]
 
 def tokenize_function(example):
+    """Tokenizes the input text using the GPT-2 tokenizer."""
     return tokenizer(example["text"], truncation=True, max_length=MAX_SEQ_LEN, padding="max_length")
 
 def group_texts(examples):
+    """Groups tokenized texts into sequences of maximum length."""
     concatenated = sum(examples["input_ids"], [])
     total_length = len(concatenated)
     total_length = (total_length // MAX_SEQ_LEN) * MAX_SEQ_LEN
@@ -288,6 +444,7 @@ def group_texts(examples):
     return result
 
 def get_streaming_dataset(split="train"):
+    """Loads and preprocesses the streaming dataset."""
     ds = load_dataset("wikitext", "wikitext-103-raw-v1", split=split, streaming=True)
     ds = ds.filter(lambda x: len(x["text"].strip()) > 0)
     ds = ds.map(tokenize_function, batched=False)
@@ -295,6 +452,7 @@ def get_streaming_dataset(split="train"):
     return ds
 
 class LMIterableDataset(IterableDataset):
+    """An iterable dataset for language modeling."""
     def __init__(self, ds_iter):
         self.ds_iter = ds_iter
 
@@ -305,6 +463,7 @@ class LMIterableDataset(IterableDataset):
                        "labels": torch.tensor(ids, dtype=torch.long)}
 
 def collate_fn(batch):
+    """Collates a batch of examples into a single batch tensor."""
     return {key: torch.stack([d[key] for d in batch], dim=0) for key in batch[0]}
 
 model = CustomTransformerModel(
@@ -326,6 +485,7 @@ model.to(device)
 optimizer = optim.AdamW(model.parameters(), lr=TRAINING_CONFIG["learning_rate"])
 
 def train():
+    """Trains the language model."""
     global_step = 0
     running_loss = 0.0
     accumulation_steps = TRAINING_CONFIG["accumulation_steps"]
