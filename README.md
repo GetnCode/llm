@@ -28,8 +28,8 @@ pip install torch transformers datasets
 ### 1. Clone the repository:
 
 ```bash
-git clone <repository_url>
-cd <repository_directory>
+git clone https://github.com/GetnCode/llm.git
+cd llm
 ```
 
 ### 2. Prepare the dataset:
